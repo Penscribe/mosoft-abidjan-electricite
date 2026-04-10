@@ -1,0 +1,510 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+
+<title>Mosoft – Carte des coupures d’électricité</title>
+
+<!-- Leaflet -->
+<link rel="stylesheet"
+href="https://unpkg.com/leaflet/dist/leaflet.css"/>
+
+<!-- FontAwesome -->
+<link rel="stylesheet"
+href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.0/css/all.min.css"/>
+
+<script src="https://unpkg.com/leaflet/dist/leaflet.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+
+<style>
+
+/* ===== STYLE GLOBAL ===== */
+
+body{
+margin:0;
+font-family:system-ui;
+background:#f4f6f8;
+display:flex;
+flex-direction:column;
+height:100vh;
+}
+
+header{
+background:#111827;
+color:white;
+padding:12px;
+text-align:center;
+font-weight:bold;
+}
+
+#container{
+display:flex;
+flex:1;
+overflow:hidden;
+}
+
+#map{
+flex:2;
+height:100%;
+}
+
+#sidebar{
+flex:1;
+background:white;
+overflow:auto;
+padding:10px;
+border-left:1px solid #ddd;
+}
+
+#historyBox{
+max-height:200px;
+overflow:auto;
+font-size:13px;
+}
+
+.zone{
+padding:8px;
+margin:6px 0;
+border-radius:8px;
+background:#f1f1f1;
+cursor:pointer;
+}
+
+.badge{
+padding:3px 8px;
+border-radius:6px;
+color:white;
+font-size:12px;
+}
+
+.green{background:#2ecc71;}
+.orange{background:#f39c12;}
+.red{background:#e74c3c;}
+.gray{background:#7f8c8d;}
+
+button{
+margin:4px;
+padding:8px;
+border:none;
+border-radius:6px;
+cursor:pointer;
+}
+
+.activity{
+font-size:13px;
+border-bottom:1px solid #eee;
+padding:5px;
+}
+
+canvas{
+margin-top:15px;
+}
+
+@media(max-width:900px){
+#container{
+flex-direction:column;
+}
+#map{
+height:300px;
+}
+}
+
+</style>
+</head>
+
+<body>
+
+<header>
+⚡ MOSOFT LAB — Carte citoyenne des coupures d’électricité
+</header>
+
+<div id="container">
+<div id="map"></div>
+
+<div id="sidebar">
+
+<h3>Zones</h3>
+<div id="zoneList"></div>
+
+<h3>Activité récente</h3>
+<div id="activity"></div>
+
+<h3 id="historique">Historique</h3>
+<div id="historyBox"></div>
+
+<button ondblclick="resetData()">⚠ Réinitialiser (double-clic)</button>
+<button onclick="toggleSimulation()">▶ Simulation</button>
+
+<canvas id="chart"></canvas>
+
+</div>
+</div>
+
+<script>
+
+/* =====================================================
+   CONFIGURATION
+===================================================== */
+
+const ZONES = [
+{name:"Abobo",coords:[5.416,-4.016]},
+{name:"Adjamé",coords:[5.366,-4.023]},
+{name:"Attécoubé",coords:[5.336,-4.050]},
+{name:"Cocody",coords:[5.350,-3.990]},
+{name:"Koumassi",coords:[5.300,-3.970]},
+{name:"Marcory",coords:[5.290,-3.980]},
+{name:"Plateau",coords:[5.320,-4.020]},
+{name:"Port-Bouët",coords:[5.260,-3.930]},
+{name:"Treichville",coords:[5.290,-4.010]},
+{name:"Yopougon",coords:[5.350,-4.080]},
+{name:"Bingerville",coords:[5.350,-3.900]},
+{name:"Songon",coords:[5.300,-4.200]},
+{name:"Anyama",coords:[5.500,-4.050]}
+];
+
+const ONE_HOUR = 60*60*1000;
+const TWO_HOURS = 2*ONE_HOUR;
+
+let signalements =
+JSON.parse(localStorage.getItem("signalements")||"[]");
+
+/* =====================================================
+   SESSION UNIQUE (simulate internautes)
+===================================================== */
+
+if(!localStorage.sessionId){
+localStorage.sessionId=Math.random().toString(36);
+}
+const SESSION = localStorage.sessionId;
+
+/* =====================================================
+   CARTE LEAFLET
+===================================================== */
+
+const map = L.map('map').setView([5.35,-4.02],11);
+
+L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png')
+.addTo(map);
+
+const markers={};
+
+/* =====================================================
+   LOGIQUE DES ÉTATS
+===================================================== */
+
+function getRecent(zone){
+const now=Date.now();
+return signalements.filter(s =>
+s.zone===zone &&
+(now-s.time)<ONE_HOUR &&
+s.type==="coupure"
+);
+}
+
+function lastActivity(zone){
+const z=signalements.filter(s=>s.zone===zone);
+if(!z.length) return null;
+return Math.max(...z.map(s=>s.time));
+}
+
+function computeState(zone){
+
+const recent=getRecent(zone);
+const last=lastActivity(zone);
+
+if(!last) return "green";
+
+if(Date.now()-last > TWO_HOURS)
+return "gray";
+
+if(recent.length>=2)
+return "red";
+
+if(recent.length>=1)
+return "orange";
+
+return "green";
+}
+
+/* =====================================================
+   SIGNALER ACTION
+===================================================== */
+
+function addSignal(zone,type){
+
+signalements.push({
+zone,
+type,
+time:Date.now(),
+session:SESSION
+});
+
+localStorage.setItem(
+"signalements",
+JSON.stringify(signalements)
+);
+
+updateAll();
+}
+
+/* =====================================================
+   UI ZONES
+===================================================== */
+
+function updateZones(){
+
+const list=document.getElementById("zoneList");
+list.innerHTML="";
+
+ZONES.forEach(z=>{
+
+const state=computeState(z.name);
+const count=getRecent(z.name).length;
+
+markers[z.name].setStyle?.();
+
+markers[z.name].setIcon(
+L.divIcon({
+className:"",
+html:`<div class="badge ${state}">
+⚡ ${count}
+</div>`
+})
+);
+
+const div=document.createElement("div");
+div.className="zone";
+
+div.innerHTML=`
+<b>${z.name}</b><br>
+<span class="badge ${state}">
+${state}
+</span>
+ (${count})
+`;
+
+div.onclick=()=>openPanel(z.name);
+
+list.appendChild(div);
+});
+}
+
+/* =====================================================
+   PANNEAU ACTIONS
+===================================================== */
+
+function openPanel(zone){
+
+const comment=prompt(
+`Zone: ${zone}
+1 = Coupure
+2 = Confirmer
+3 = Rétablissement`
+);
+
+if(comment==="1") addSignal(zone,"coupure");
+if(comment==="2") addSignal(zone,"coupure");
+if(comment==="3"){
+signalements =
+signalements.filter(s=>s.zone!==zone);
+updateAll();
+}
+}
+
+/* =====================================================
+   ACTIVITÉ TEMPS RÉEL
+===================================================== */
+
+function updateActivity(){
+
+const box=document.getElementById("activity");
+box.innerHTML="";
+
+signalements
+.slice(-10)
+.reverse()
+.forEach(s=>{
+
+const d=new Date(s.time);
+
+const el=document.createElement("div");
+el.className="activity";
+el.innerHTML=
+`${d.toLocaleTimeString()}
+ - ${s.zone} : ${s.type}`;
+
+box.appendChild(el);
+
+});
+}
+
+/* =====================================================
+   HISTORIQUE DES COUPURES
+===================================================== */
+
+function updateHistory(){
+
+const box = document.getElementById("historyBox");
+box.innerHTML = "";
+
+signalements
+.slice()
+.reverse()
+.forEach(s => {
+
+const d = new Date(s.time);
+
+const el = document.createElement("div");
+el.className = "activity";
+
+el.innerHTML = `
+<b>${s.zone}</b><br>
+${s.type} <br>
+<small>${d.toLocaleString()}</small>
+`;
+
+box.appendChild(el);
+
+});
+}
+
+/* =====================================================
+   CHART.JS
+===================================================== */
+
+function updateChart(){
+
+const now = Date.now();
+
+/* === 7 DERNIERS JOURS === */
+let days = {};
+for(let i=6;i>=0;i--){
+let d = new Date(now - i*24*60*60*1000);
+let key = d.toLocaleDateString();
+days[key]=0;
+}
+
+/* === 6 DERNIERS MOIS === */
+let months = {};
+for(let i=5;i>=0;i--){
+let d = new Date();
+d.setMonth(d.getMonth()-i);
+let key = d.toLocaleString('default',{month:'short'});
+months[key]=0;
+}
+
+/* === COMPTER === */
+signalements.forEach(s=>{
+if(s.type !== "coupure") return;
+
+let d = new Date(s.time);
+
+/* jours */
+let dayKey = d.toLocaleDateString();
+if(days[dayKey] !== undefined) days[dayKey]++;
+
+/* mois */
+let monthKey = d.toLocaleString('default',{month:'short'});
+if(months[monthKey] !== undefined) months[monthKey]++;
+});
+
+/* === DATASET === */
+chart.data.labels = Object.keys(days);
+
+chart.data.datasets = [
+{
+label:"Coupures (7 jours)",
+data:Object.values(days)
+},
+{
+label:"Coupures (mois)",
+data:Object.values(months)
+}
+];
+
+chart.update();
+}
+
+/* =====================================================
+   INITIALISATION MARQUEURS
+===================================================== */
+
+ZONES.forEach(z=>{
+markers[z.name]=L.marker(z.coords)
+.addTo(map)
+.on("click",()=>openPanel(z.name));
+});
+
+/* =====================================================
+   SIMULATION BONUS
+===================================================== */
+
+let sim=false;
+let simInterval;
+
+function toggleSimulation(){
+
+sim=!sim;
+
+if(sim){
+simInterval=setInterval(()=>{
+const z=ZONES[Math.floor(Math.random()*ZONES.length)];
+addSignal(z.name,"coupure");
+},30000);
+}else{
+clearInterval(simInterval);
+}
+}
+
+/* =====================================================
+   RESET DEMO
+===================================================== */
+
+function resetData(){
+localStorage.removeItem("signalements");
+signalements=[];
+updateAll();
+}
+
+/* =====================================================
+   UPDATE GLOBAL
+===================================================== */
+
+function updateAll(){
+updateZones();
+updateActivity();
+updateHistory();
+updateChart();
+}
+
+setInterval(updateAll,5000);
+
+updateAll();
+
+/* =====================================================
+   COMMENT PASSER EN VERSION RÉELLE
+===================================================== */
+
+/*
+Remplacer localStorage par :
+
+1. Backend API (Node.js / Django / Laravel)
+2. Base PostgreSQL
+3. WebSocket (Socket.io)
+
+Flux réel :
+Utilisateur -> POST /signalement
+Serveur -> broadcast websocket
+Clients -> updateAll()
+
+=> véritable temps réel multi-utilisateurs.
+*/
+
+</script>
+
+</body>
+<footer>
+Produit expérimental développé par Mosoft © 2026
+</footer>
+</html>
